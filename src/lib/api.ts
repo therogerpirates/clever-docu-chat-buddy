@@ -1,3 +1,4 @@
+
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
 
 export const apiRequest = async (endpoint: string, options: RequestInit = {}) => {
@@ -5,6 +6,12 @@ export const apiRequest = async (endpoint: string, options: RequestInit = {}) =>
   
   // Ensure headers are set
   const headers = new Headers(options.headers);
+  
+  // Add authentication token if available
+  const token = localStorage.getItem('access_token');
+  if (token) {
+    headers.set('Authorization', `Bearer ${token}`);
+  }
   
   // Only set Content-Type if it's not a FormData object and not already set
   if (!(options.body instanceof FormData) && !headers.has('Content-Type')) {
@@ -28,7 +35,13 @@ export const apiRequest = async (endpoint: string, options: RequestInit = {}) =>
       errorData = { message: await response.text() };
     }
     
-    const error = new Error(errorData.message || 'API request failed');
+    // If unauthorized, clear token and redirect to login
+    if (response.status === 401) {
+      localStorage.removeItem('access_token');
+      window.location.href = '/login';
+    }
+    
+    const error = new Error(errorData.message || errorData.detail || 'API request failed');
     (error as any).status = response.status;
     (error as any).data = errorData;
     throw error;
