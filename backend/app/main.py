@@ -56,7 +56,6 @@ class FileRestrictionRequest(BaseModel):
     user_ids: List[int]
 
 # CORS configuration
-# ... keep existing code (CORS setup)
 origins = [
     "http://localhost:8080",
     "http://127.0.0.1:8080",
@@ -437,6 +436,9 @@ async def list_files(current_user: User = Depends(get_current_user), db: Session
             
             status_value = file.status if file.status is not None else FileStatus.PROCESSING
             
+            # Check if user has restrictions on this file
+            is_restricted = current_user in file.restricted_users
+            
             result.append({
                 "id": file.id,
                 "file_uuid": str(file.file_uuid),
@@ -449,7 +451,9 @@ async def list_files(current_user: User = Depends(get_current_user), db: Session
                 "size": file_size,
                 "metadata": metadata,
                 "uploaded_by": file.uploaded_by.username if file.uploaded_by else None,
-                "can_edit": current_user.role == UserRole.ADMIN or file.uploaded_by_id == current_user.id
+                "can_edit": current_user.role == UserRole.ADMIN or file.uploaded_by_id == current_user.id,
+                "is_restricted": is_restricted,
+                "restricted_users": [user.username for user in file.restricted_users] if current_user.role == UserRole.ADMIN else []
             })
             
         return result
@@ -497,7 +501,6 @@ async def delete_file(
         logger.error(f"Error deleting file: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to delete file")
 
-# ... keep existing code (other endpoints like get_file, reprocess_file, etc. but add authentication requirements)
 @app.get("/api/files/{file_id}")
 async def get_file(
     file_id: int,

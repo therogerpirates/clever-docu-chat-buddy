@@ -23,6 +23,10 @@ interface FileData {
   size?: string;
   url?: string;
   metadata?: Record<string, any>;
+  uploaded_by?: string;
+  can_edit?: boolean;
+  is_restricted?: boolean;
+  restricted_users?: string[];
 }
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
@@ -265,6 +269,10 @@ const Files = () => {
                   status: file.status,
                   size: file.size,
                   url: file.url,
+                  uploaded_by: file.uploaded_by,
+                  can_edit: file.can_edit,
+                  is_restricted: file.is_restricted,
+                  restricted_users: file.restricted_users,
                 };
                 
                 return (

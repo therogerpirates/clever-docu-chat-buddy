@@ -109,3 +109,19 @@ export const deleteFile = async (fileId: string | number) => {
 
   return response.json();
 };
+
+// New functions for file restrictions
+export const setFileRestrictions = async (fileId: string | number, userIds: number[]) => {
+  return apiRequest(`/api/files/${fileId}/restrictions`, {
+    method: 'POST',
+    body: JSON.stringify({ user_ids: userIds })
+  });
+};
+
+export const getFileRestrictions = async (fileId: string | number) => {
+  return apiRequest(`/api/files/${fileId}/restrictions`);
+};
+
+export const fetchUsers = async () => {
+  return apiRequest('/api/users');
+};
