@@ -1,4 +1,5 @@
-from sqlalchemy import Column, Integer, String, DateTime, JSON, Enum, ForeignKey, Text, UUID
+
+from sqlalchemy import Column, Integer, String, DateTime, JSON, Enum, ForeignKey, Text, UUID, Boolean, Table
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
 from datetime import datetime
@@ -6,6 +7,11 @@ import enum
 import uuid
 
 Base = declarative_base()
+
+class UserRole(enum.Enum):
+    ADMIN = "admin"
+    MANAGER = "manager"
+    EMPLOYEE = "employee"
 
 class RagType(enum.Enum):
     SQL = "sql"
@@ -25,12 +31,37 @@ class FileStatus(enum.Enum):
     def lowercase(self):
         return self.value.lower()
 
-class File(Base):
-    __tablename__ = "files"
-    __table_args__ = {'sqlite_autoincrement': True}  # Ensure auto-increment works in SQLite
+# Association table for file restrictions
+file_restrictions = Table(
+    'file_restrictions',
+    Base.metadata,
+    Column('file_id', Integer, ForeignKey('files.id', ondelete="CASCADE")),
+    Column('user_id', Integer, ForeignKey('users.id', ondelete="CASCADE"))
+)
+
+class User(Base):
+    __tablename__ = "users"
+    __table_args__ = {'sqlite_autoincrement': True}
 
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
-    file_uuid = Column(UUID, unique=True, default=uuid.uuid4, index=True)  # Common identifier
+    username = Column(String, unique=True, nullable=False, index=True)
+    email = Column(String, unique=True, nullable=False, index=True)
+    password_hash = Column(String, nullable=False)
+    role = Column(Enum(UserRole), nullable=False)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Relationships
+    uploaded_files = relationship("File", back_populates="uploaded_by")
+    restricted_files = relationship("File", secondary=file_restrictions, back_populates="restricted_users")
+
+class File(Base):
+    __tablename__ = "files"
+    __table_args__ = {'sqlite_autoincrement': True}
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    file_uuid = Column(UUID, unique=True, default=uuid.uuid4, index=True)
     filename = Column(String, nullable=False)
     original_filename = Column(String, nullable=False)
     file_path = Column(String, nullable=False)
@@ -38,15 +69,19 @@ class File(Base):
     rag_type = Column(Enum(RagType), nullable=True)
     description = Column(String, nullable=True)
     status = Column(Enum(FileStatus), nullable=False, default=FileStatus.PROCESSING)
+    uploaded_by_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
     # Relationships
+    uploaded_by = relationship("User", back_populates="uploaded_files")
+    restricted_users = relationship("User", secondary=file_restrictions, back_populates="restricted_files")
     processed_data = relationship("ProcessedData", back_populates="file", cascade="all, delete-orphan")
     pdf_document = relationship("PDFDocument", back_populates="file", uselist=False, cascade="all, delete-orphan")
     csv_document = relationship("CSVDocument", back_populates="file", uselist=False, cascade="all, delete-orphan")
     xlsx_document = relationship("XLSXDocument", back_populates="file", uselist=False, cascade="all, delete-orphan")
 
+# ... keep existing code (ProcessedData, PDFDocument, PDFChunk, CSVDocument, CSVChunk, XLSXDocument, XLSXChunk classes)
 class ProcessedData(Base):
     __tablename__ = "processed_data"
     __table_args__ = {'sqlite_autoincrement': True}
@@ -57,7 +92,6 @@ class ProcessedData(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    # Relationship with file
     file = relationship("File", back_populates="processed_data")
 
 class PDFDocument(Base):
@@ -72,9 +106,7 @@ class PDFDocument(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    # Relationship with file
     file = relationship("File", back_populates="pdf_document")
-    # Relationship with chunks
     chunks = relationship("PDFChunk", back_populates="document", cascade="all, delete-orphan")
 
 class PDFChunk(Base):
@@ -85,11 +117,10 @@ class PDFChunk(Base):
     document_id = Column(Integer, ForeignKey("pdf_documents.id", ondelete="CASCADE"))
     page_number = Column(Integer, nullable=False)
     content = Column(Text, nullable=False)
-    embedding = Column(JSON, nullable=False)  # Store the embedding vector
+    embedding = Column(JSON, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    # Relationship with document
     document = relationship("PDFDocument", back_populates="chunks")
 
 class CSVDocument(Base):
@@ -103,9 +134,7 @@ class CSVDocument(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    # Relationship with file
     file = relationship("File", back_populates="csv_document")
-    # Relationship with chunks
     chunks = relationship("CSVChunk", back_populates="document", cascade="all, delete-orphan")
 
 class CSVChunk(Base):
@@ -115,12 +144,11 @@ class CSVChunk(Base):
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
     document_id = Column(Integer, ForeignKey("csv_documents.id", ondelete="CASCADE"))
     row_number = Column(Integer, nullable=False)
-    content = Column(Text, nullable=False)  # Store row content as JSON string
-    embedding = Column(JSON, nullable=False)  # Store the embedding vector
+    content = Column(Text, nullable=False)
+    embedding = Column(JSON, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    # Relationship with document
     document = relationship("CSVDocument", back_populates="chunks")
 
 class XLSXDocument(Base):
@@ -135,9 +163,7 @@ class XLSXDocument(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    # Relationship with file
     file = relationship("File", back_populates="xlsx_document")
-    # Relationship with chunks
     chunks = relationship("XLSXChunk", back_populates="document", cascade="all, delete-orphan")
 
 class XLSXChunk(Base):
@@ -148,10 +174,9 @@ class XLSXChunk(Base):
     document_id = Column(Integer, ForeignKey("xlsx_documents.id", ondelete="CASCADE"))
     sheet_name = Column(String, nullable=False)
     row_number = Column(Integer, nullable=False)
-    content = Column(Text, nullable=False)  # Store row content as JSON string
-    embedding = Column(JSON, nullable=False)  # Store the embedding vector
+    content = Column(Text, nullable=False)
+    embedding = Column(JSON, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    # Relationship with document
     document = relationship("XLSXDocument", back_populates="chunks")
