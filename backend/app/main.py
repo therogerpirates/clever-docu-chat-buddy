@@ -40,7 +40,9 @@ from .auth import (
     require_admin, require_admin_or_manager, ACCESS_TOKEN_EXPIRE_MINUTES
 )
 from .pdf_utils import extract_pdf_metadata, extract_pdf_content, get_embedding_with_retry as get_pdf_embedding_with_retry
-from .csv_utils import get_embedding_with_retry as get_csv_embedding_with_retry
+from .csv_utils import process_csv_for_sql_rag_with_insights
+from .xlsx_utils import process_xlsx_for_sql_rag_with_insights
+from .rag_utils import VectorStore
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -334,188 +336,140 @@ async def chat(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Handle chat requests with RAG - now with authentication."""
+    """Unified chat endpoint: LLM/agent chooses RAG type per file using summary embedding and metadata."""
     try:
-        # Log the start of the request
-        logger.info(f"Received chat request from user {current_user.username} (ID: {current_user.id})")
-        
-        # Parse request body
-        try:
-            body = await request.json()
-            messages = body.get("messages", [])
-            system_prompt = body.get("system_prompt")
-            model_name = body.get("model")
-            use_rag = body.get("use_rag", True)
-            rag_limit = body.get("rag_limit", 3)
-            min_score = body.get("min_score", 0.5)
-            
-            # Log request details
-            logger.debug(f"Request body: {json.dumps(body, indent=2)}")
-            logger.info(f"Processing {len(messages)} messages with model: {model_name or 'default'}")
-            
-        except json.JSONDecodeError as je:
-            error_msg = f"Invalid JSON in request body: {str(je)}"
-            logger.error(error_msg)
-            raise HTTPException(status_code=400, detail=error_msg)
-        except Exception as e:
-            error_msg = f"Error parsing request body: {str(e)}"
-            logger.error(error_msg)
-            raise HTTPException(status_code=400, detail=error_msg)
-        
-        logger.info(f"User {current_user.username} (ID: {current_user.id}, Role: {current_user.role}) sent chat request with {len(messages)} messages")
-        logger.debug(f"Chat request body: {json.dumps(body, indent=2)}")
+        logger.info(f"[CHAT] Received chat request from user {current_user.username} (ID: {current_user.id})")
+        body = await request.json()
+        messages = body.get("messages", [])
+        system_prompt = body.get("system_prompt")
+        model_name = body.get("model")
+        use_rag = body.get("use_rag", True)
+        rag_limit = body.get("rag_limit", 5)
+        min_score = body.get("min_score", 0.5)
         
         user_message = next((msg["content"] for msg in reversed(messages) if msg["role"] == "user"), None)
-        
-        context = ""
-        sources = []
-        
-        if use_rag and user_message:
-            try:
-                from .rag_utils import VectorStore, generate_insights_from_chunks
-                
-                logger.info(f"Starting RAG processing for user: {current_user.username}")
-                
-                # Search for relevant chunks with access control
-                vector_store = VectorStore(db)
-                logger.info(f"Searching for relevant chunks for query: {user_message}")
-                
-                relevant_chunks = await vector_store.search_semantic(
+        if not user_message:
+            return JSONResponse(content={"response": "No user message provided."}, status_code=400)
+
+        # Get all files the user has access to
+        files = db.query(File).all() if current_user.role == 'admin' else [f for f in db.query(File).all() if can_access_file(f, current_user)]
+        logger.info(f"[CHAT] User has access to {len(files)} files.")
+
+        from .rag_utils import VectorStore
+        vector_store = VectorStore(db)
+        from .llm_utils import get_groq_chat
+        from langchain_core.messages import HumanMessage
+        import json
+
+        all_sql_results = []
+        all_semantic_results = []
+        file_infos = []
+
+        for file in files:
+            logger.info(f"[CHAT] Processing file: {file.original_filename} (type={file.file_type.value}, rag_type={file.rag_type})")
+            rag_decision = 'semantic'  # default
+            summary = None
+            if file.file_type.value in ["csv", "xlsx"] and file.rag_type == RagType.SQL:
+                # Try to use the summary for agent decision
+                doc = None
+                if file.file_type.value == "csv":
+                    doc = db.query(CSVDocument).filter(CSVDocument.file_id == file.id).first()
+                elif file.file_type.value == "xlsx":
+                    doc = db.query(XLSXDocument).filter(XLSXDocument.file_id == file.id).first()
+                summary = doc.header.get('summary') if doc and doc.header else None
+                # Agent prompt: decide RAG type
+                agent_prompt = f"""
+You are an AI agent that decides the best retrieval method for a user query given a table summary.
+Table: {file.original_filename}
+Summary: {summary}
+Query: {user_message}
+
+Choose one of: 'sql', 'semantic', or 'hybrid'.
+Respond with only the method name.
+"""
+                chat = await get_groq_chat(temperature=0.1)
+                decision_response = await chat.ainvoke([HumanMessage(content=agent_prompt)])
+                rag_decision = decision_response.content.strip().lower()
+                logger.info(f"[CHAT] Agent decision for {file.original_filename}: {rag_decision}")
+            # Run the chosen RAG
+            if rag_decision == 'sql':
+                try:
+                    result = await vector_store.hybrid_sql_semantic_search(user_message, file.id, limit=rag_limit, current_user=current_user)
+                    if result.get('sql_results') and result['sql_results'].get('row_count', 0) > 0:
+                        all_sql_results.append({**result, 'file_info': result.get('file_info', {'filename': file.original_filename})})
+                    file_infos.append(result.get('file_info', {'filename': file.original_filename}))
+                except Exception as e:
+                    logger.error(f"[CHAT] Error in SQL RAG for file {file.original_filename}: {str(e)}", exc_info=True)
+            elif rag_decision == 'hybrid':
+                try:
+                    result = await vector_store.hybrid_sql_semantic_search(user_message, file.id, limit=rag_limit, current_user=current_user)
+                    if result.get('sql_results') and result['sql_results'].get('row_count', 0) > 0:
+                        all_sql_results.append({**result, 'file_info': result.get('file_info', {'filename': file.original_filename})})
+                    if result.get('semantic_results'):
+                        all_semantic_results.extend([{**r, 'file_info': result.get('file_info', {'filename': file.original_filename})} for r in result['semantic_results']])
+                    file_infos.append(result.get('file_info', {'filename': file.original_filename}))
+                except Exception as e:
+                    logger.error(f"[CHAT] Error in hybrid RAG for file {file.original_filename}: {str(e)}", exc_info=True)
+            else:  # semantic
+                try:
+                    semantic_chunks = await vector_store.search_semantic(
                     query=user_message,
                     limit=rag_limit,
                     min_score=min_score,
+                        file_type=file.file_type.value,
                     current_user=current_user
                 )
-                
-                logger.info(f"Found {len(relevant_chunks)} relevant chunks")
-                
-                if relevant_chunks:
-                    try:
-                        logger.info("Generating insights from chunks...")
-                        insights = await generate_insights_from_chunks(
-                            query=user_message,
-                            chunks=relevant_chunks,
-                            model_name=model_name
-                        )
-                        
-                        logger.info("Successfully generated insights from RAG")
-                        
-                        # Prepare response data with all required fields
-                        response_data = {
-                            "response": insights.get("response", "No response generated"),
-                            "model": model_name or os.getenv("LLM_MODEL", "unknown"),
-                            "sources": insights.get("sources", []),
-                            "usage": {}
-                        }
-                        
-                        logger.debug(f"Response data prepared: {json.dumps(response_data, indent=2)}")
-                        
-                        logger.debug(f"RAG response data: {response_data}")
-                        
-                        return JSONResponse(
-                            content=response_data,
-                            headers={"Access-Control-Allow-Origin": "*"}
-                        )
-                    except Exception as inner_e:
-                        logger.error(f"Error in RAG response generation: {str(inner_e)}", exc_info=True)
-                        # Fall through to non-RAG response
-                else:
-                    logger.info("No relevant chunks found for RAG, falling back to general response")
-                    
+                    if semantic_chunks:
+                        all_semantic_results.extend([{**r, 'file_info': {'filename': file.original_filename, 'file_type': file.file_type.value}} for r in semantic_chunks])
+                        file_infos.append({'filename': file.original_filename, 'file_type': file.file_type.value})
+                except Exception as e:
+                    logger.error(f"[CHAT] Error in semantic RAG for file {file.original_filename}: {str(e)}", exc_info=True)
+
+        # Aggregate and rank results
+        logger.info(f"[CHAT] Aggregating results: {len(all_sql_results)} SQL, {len(all_semantic_results)} semantic.")
+        response_type = None
+        if all_sql_results and all_semantic_results:
+            response_type = 'hybrid'
+        elif all_sql_results:
+            response_type = 'sql_primary'
+        elif all_semantic_results:
+            response_type = 'semantic_primary'
+        else:
+            response_type = 'no_results'
+
+        # Prepare a unified response
+        response_data = {
+            'response_type': response_type,
+            'sql_results': all_sql_results,
+            'semantic_results': all_semantic_results,
+            'file_infos': file_infos,
+            'response': None,
+            'sources': [fi['filename'] for fi in file_infos if 'filename' in fi],
+        }
+
+        # Optionally, use LLM to synthesize a final answer from all results
+        if all_sql_results or all_semantic_results:
+            try:
+                context_chunks = []
+                for sql in all_sql_results:
+                    if sql.get('sql_results') and sql['sql_results'].get('data'):
+                        context_chunks.append({'content': json.dumps(sql['sql_results']['data'][:3]), 'score': 1.0, 'type': 'SQL', 'source': sql['file_info']['filename']})
+                for sem in all_semantic_results:
+                    context_chunks.append({'content': sem['content'], 'score': sem.get('score', 1.0), 'type': sem.get('type', 'semantic'), 'source': sem['file_info']['filename']})
+                insights = await vector_store.generate_insights_from_chunks(user_message, context_chunks)
+                response_data['response'] = insights.get('response')
+                response_data['sources'] = insights.get('sources', [])
             except Exception as e:
-                logger.error(f"Error in RAG processing: {str(e)}", exc_info=True)
-                # Fall back to non-RAG response
-                logger.info("Falling back to general response generation with model: %s", model_name)
-                response_data = await generate_chat_response(
-                    messages=messages,
-                    system_prompt=system_prompt,
-                    model_name=model_name
-                )
-                
-                if "error" in response_data:
-                    error_msg = f"Error in chat response: {response_data['error']}"
-                    logger.error(error_msg)
-                    return JSONResponse(
-                        status_code=500,
-                        content={
-                            "error": response_data["error"],
-                            "response": response_data.get("response", "An error occurred"),
-                            "sources": []
-                        },
-                        headers={"Access-Control-Allow-Origin": "*"}
-                    )
-                
-                logger.info("Chat response generated successfully")
-                return JSONResponse(
-                    status_code=200,
-                    content=response_data,
-                    headers={"Access-Control-Allow-Origin": "*"}
-                )
-            
-            # If we get here, RAG was attempted but no relevant chunks were found
-            logger.info("No relevant chunks found in RAG, falling back to general response")
-            
-        # Fall through to non-RAG response generation
-        logger.info("Using non-RAG response generation")
-        try:
-            response_data = await generate_chat_response(
-                messages=messages,
-                system_prompt=system_prompt,
-                model_name=model_name
-            )
-            
-            if "error" in response_data:
-                error_msg = f"Error in chat response: {response_data['error']}"
-                logger.error(error_msg)
-                return JSONResponse(
-                    status_code=500,
-                    content={
-                        "error": response_data["error"],
-                        "response": response_data.get("response", "An error occurred"),
-                        "sources": []
-                    },
-                    headers={"Access-Control-Allow-Origin": "*"}
-                )
-                
-            logger.info("Chat response generated successfully")
-            return JSONResponse(
-                status_code=200,
-                content=response_data,
-                headers={"Access-Control-Allow-Origin": "*"}
-            )
-            
-        except Exception as e:
-            logger.error(f"Error generating chat response: {str(e)}", exc_info=True)
-            raise HTTPException(
-                status_code=500,
-                detail={
-                    "error": "Failed to generate response",
-                    "message": str(e)
-                }
-            )
-        
-    except HTTPException:
-        # Re-raise HTTP exceptions as they are
-        raise
+                logger.error(f"[CHAT] Error generating unified LLM response: {str(e)}", exc_info=True)
+                response_data['response'] = "I found relevant data, but couldn't generate a unified answer. Please review the results below."
+        else:
+            response_data['response'] = "I couldn't find any relevant information to answer your question."
+
+        logger.info(f"[CHAT] Unified response ready. Returning to user.")
+        return JSONResponse(content=response_data)
     except Exception as e:
-        error_msg = f"Unexpected error processing chat request: {str(e)}"
-        logger.error(error_msg)
-        logger.exception("Error details:")
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "error": "Internal server error",
-                "message": "An unexpected error occurred while processing your request"
-            }
-        )
-    except json.JSONDecodeError:
-        logger.error("Invalid JSON in request body")
-        raise HTTPException(status_code=400, detail="Invalid JSON in request body")
-    except Exception as e:
-        logger.error(f"Error in chat endpoint: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to process chat request")
-        logger.error(error_msg)
-        raise HTTPException(status_code=500, detail=error_msg)
+        logger.error(f"[CHAT] Unexpected error: {str(e)}", exc_info=True)
+        return JSONResponse(content={"response": "An error occurred while processing your request."}, status_code=500)
 
 @app.post("/api/upload")
 @app.post("/api/upload/website", response_model=dict)
@@ -859,39 +813,105 @@ async def upload_file(
                 "embeddings": embeddings,
             }
 
-        # CSV processing (use test_csv_processing.py logic)
+        # CSV processing
         if file_extension == '.csv':
             df = pd.read_csv(str(file_path))
-            results = []
-            for idx, row in df.iterrows():
-                row_dict = row.to_dict()
-                content_str = json.dumps(row_dict, ensure_ascii=False)
-                try:
-                    embedding = get_csv_embedding_with_retry(content_str)
-                    results.append({
-                        "row_number": idx + 1,
-                        "content": content_str,
-                        "embedding": embedding
-                    })
-                except Exception as e:
-                    results.append({
-                        "row_number": idx + 1,
-                        "content": content_str,
-                        "embedding": None,
-                        "error": str(e)
-                    })
-            return {
-                "status": "success",
-                "message": "CSV processed successfully",
-                "filename": file.filename,
-                "columns": list(df.columns),
-                "rows": results,
-            }
+            # Save file to database first
+            file_record = save_file_to_db(
+                file_path=file_path,
+                original_filename=file.filename,
+                file_type=FileType.CSV,
+                description=description or "",
+                rag_type=RagType(rag_type),
+                uploaded_by_id=current_user.id,
+                db=db
+            )
+            if rag_type == 'sql':
+                # Only process for SQL RAG: create table and summary, no row embeddings
+                table_name, summary_embedding = await process_csv_for_sql_rag_with_insights(
+                    df, file_record.id, file.filename, db
+                )
+                file_record.status = FileStatus.READY
+                db.commit()
+                return {
+                    "status": "success",
+                    "message": "CSV processed for SQL RAG successfully",
+                    "filename": file.filename,
+                    "file_id": file_record.id,
+                    "table_name": table_name,
+                    "columns": list(df.columns),
+                    "row_count": len(df),
+                    "rag_type": "sql"
+                }
+            else:
+                # Process for semantic RAG (existing logic)
+                results = []
+                for idx, row in df.iterrows():
+                    row_dict = row.to_dict()
+                    content_str = json.dumps(row_dict, ensure_ascii=False)
+                    try:
+                        embedding = get_pdf_embedding_with_retry(content_str)
+                        results.append({
+                            "row_number": idx + 1,
+                            "content": content_str,
+                            "embedding": embedding
+                        })
+                    except Exception as e:
+                        results.append({
+                            "row_number": idx + 1,
+                            "content": content_str,
+                            "embedding": None,
+                            "error": str(e)
+                        })
+                return {
+                    "status": "success",
+                    "message": "CSV processed for semantic RAG successfully",
+                    "filename": file.filename,
+                    "file_id": file_record.id,
+                    "columns": list(df.columns),
+                    "rows": results,
+                    "rag_type": "semantic"
+                }
 
-        # XLSX: (optional, similar logic can be added)
+        # XLSX processing
+        if file_extension in ['.xlsx', '.xls']:
+            # Save file to database first
+            file_record = save_file_to_db(
+                file_path=file_path,
+                original_filename=file.filename,
+                file_type=FileType.XLSX,
+                description=description or "",
+                rag_type=RagType(rag_type),
+                uploaded_by_id=current_user.id,
+                db=db
+            )
+            if rag_type == 'sql':
+                # Process for SQL RAG
+                table_name, insights_embedding = await process_xlsx_for_sql_rag_with_insights(
+                    file_path, file_record.id, file.filename, db
+                )
+                return {
+                    "status": "success",
+                    "message": "XLSX processed for SQL RAG successfully",
+                    "filename": file.filename,
+                    "file_id": file_record.id,
+                    "table_name": table_name,
+                    "rag_type": "sql"
+                }
+            else:
+                # Process for semantic RAG (basic processing)
+                return {
+                    "status": "success",
+                    "message": "XLSX processed for semantic RAG successfully",
+                    "filename": file.filename,
+                    "file_id": file_record.id,
+                    "rag_type": "semantic"
+                }
+        
+        # Other file types
         return {
             "status": "success",
-            "message": "File uploaded and processed (non-PDF/CSV)",
+            "message": "File uploaded and processed (non-PDF/CSV/XLSX)",
             "filename": file.filename,
         }
             
@@ -1132,3 +1152,68 @@ async def options_upload():
 @app.options("/api/chat")
 async def options_chat():
     return {"message": "OK"}
+
+# Add SQL RAG endpoints
+@app.post("/api/rag/sql")
+async def sql_rag_search(
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Perform SQL RAG search on a specific file."""
+    try:
+        data = await request.json()
+        query = data.get('query')
+        file_id = data.get('file_id')
+        
+        if not query or not file_id:
+            raise HTTPException(status_code=400, detail="Query and file_id are required")
+        
+        # Initialize vector store
+        vector_store = VectorStore(db)
+        
+        # Perform SQL RAG search
+        results = await vector_store.search_sql_rag(query, file_id, current_user=current_user)
+        
+        if 'error' in results:
+            raise HTTPException(status_code=400, detail=results['error'])
+        
+        return results
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in SQL RAG search: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
+
+@app.post("/api/rag/hybrid")
+async def hybrid_rag_search(
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Perform hybrid SQL and semantic RAG search."""
+    try:
+        data = await request.json()
+        query = data.get('query')
+        file_id = data.get('file_id')
+        
+        if not query or not file_id:
+            raise HTTPException(status_code=400, detail="Query and file_id are required")
+        
+        # Initialize vector store
+        vector_store = VectorStore(db)
+        
+        # Perform hybrid search
+        results = await vector_store.hybrid_sql_semantic_search(query, file_id, current_user=current_user)
+        
+        if 'error' in results:
+            raise HTTPException(status_code=400, detail=results['error'])
+        
+        return results
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in hybrid RAG search: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")

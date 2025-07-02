@@ -9,6 +9,8 @@ from sqlalchemy.orm import Session
 
 from .models import XLSXDocument, XLSXChunk
 from .utils import get_embedding
+from .database import create_dynamic_table, insert_rows_to_dynamic_table, engine
+from .llm_utils import get_groq_chat, get_embedding
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -183,3 +185,151 @@ def process_xlsx_with_embeddings(file_path: str, db: Session, file_id: int, batc
     except Exception as e:
         logger.error(f"Error processing XLSX with embeddings: {str(e)}")
         raise
+
+async def generate_xlsx_database_insights(file_path: str, original_filename: str) -> str:
+    """
+    Generate database insights using LLM for XLSX data.
+    Args:
+        file_path: Path to the XLSX file
+        original_filename: The original filename
+    Returns:
+        str: Generated insights about the database structure and data
+    """
+    try:
+        # Read all sheets
+        excel_file = pd.ExcelFile(file_path)
+        sheet_names = excel_file.sheet_names
+        
+        # Analyze each sheet
+        sheets_info = []
+        total_rows = 0
+        all_columns = set()
+        
+        for sheet_name in sheet_names:
+            df = pd.read_excel(file_path, sheet_name=sheet_name)
+            if df.empty:
+                continue
+                
+            total_rows += len(df)
+            all_columns.update(df.columns)
+            
+            # Prepare column information for this sheet
+            columns_info = []
+            for col in df.columns:
+                col_type = str(df[col].dtype)
+                unique_count = df[col].nunique()
+                null_count = df[col].isnull().sum()
+                sample_values = df[col].dropna().head(3).tolist()
+                
+                columns_info.append({
+                    'name': col,
+                    'type': col_type,
+                    'unique_values': unique_count,
+                    'null_count': null_count,
+                    'sample_values': sample_values
+                })
+            
+            sheets_info.append({
+                'sheet_name': sheet_name,
+                'row_count': len(df),
+                'column_count': len(df.columns),
+                'columns': columns_info
+            })
+        
+        # Create the analysis prompt
+        analysis_prompt = f"""
+You are a data analyst and SQL expert. You are analyzing a multi-sheet database created from the Excel file: {original_filename}
+
+File Structure:
+- Total Sheets: {len(sheet_names)}
+- Total Rows Across All Sheets: {total_rows}
+- Unique Columns Across All Sheets: {len(all_columns)}
+
+Sheet Details:
+{json.dumps(sheets_info, indent=2)}
+
+Please provide a comprehensive analysis including:
+1. Multi-sheet database schema overview
+2. Data types and their implications for SQL queries
+3. Key insights about the data structure across sheets
+4. Potential use cases for SQL analysis (including JOINs between sheets)
+5. Important columns for filtering, grouping, and aggregation
+6. Data quality observations across sheets
+7. Suggested SQL query patterns for this multi-sheet dataset
+8. How to effectively query data that spans multiple sheets
+
+Focus on providing insights that would help users write effective SQL queries against this multi-sheet data, including when to use JOINs and how to structure queries for cross-sheet analysis.
+"""
+
+        # Get LLM response
+        chat = await get_groq_chat(temperature=0.3)
+        from langchain_core.messages import HumanMessage
+        
+        response = await chat.ainvoke([HumanMessage(content=analysis_prompt)])
+        insights = response.content
+        
+        return insights
+        
+    except Exception as e:
+        logger.error(f"Error generating XLSX database insights: {str(e)}")
+        return f"Database analysis for {original_filename}: {len(sheet_names)} sheets, {total_rows} total rows. Sheets: {', '.join(sheet_names)}"
+
+def process_xlsx_for_sql_rag(file_path: str, file_id: int, original_filename: str):
+    """
+    Ingest XLSX data into a dynamic SQL table for SQL RAG.
+    Args:
+        file_path: Path to the XLSX file
+        file_id: The file's unique ID
+        original_filename: The original filename to store in the table
+    """
+    excel_file = pd.ExcelFile(file_path)
+    sheet_names = excel_file.sheet_names
+    all_rows = []
+    columns_set = set()
+    for sheet_name in sheet_names:
+        df = pd.read_excel(file_path, sheet_name=sheet_name)
+        if df.empty:
+            continue
+        df.columns = [col.lower() for col in df.columns]
+        for row in df.to_dict(orient='records'):
+            row['sheet_name'] = sheet_name
+            all_rows.append(row)
+        columns_set.update(df.columns)
+    columns = list(columns_set) + ['sheet_name']
+    table_name = f"xlsx_data_{file_id}"
+    create_dynamic_table(engine, table_name, columns, original_filename=original_filename)
+    insert_rows_to_dynamic_table(engine, table_name, columns, all_rows, original_filename=original_filename)
+    return table_name
+
+async def process_xlsx_for_sql_rag_with_insights(file_path: str, file_id: int, original_filename: str, db: Session):
+    """
+    Ingest XLSX data into a dynamic SQL table and generate insights for SQL RAG.
+    Args:
+        file_path: Path to the XLSX file
+        file_id: The file's unique ID
+        original_filename: The original filename
+        db: Database session for storing insights
+    Returns:
+        tuple: (table_name, insights_embedding)
+    """
+    # Create the dynamic table
+    table_name = process_xlsx_for_sql_rag(file_path, file_id, original_filename)
+    
+    # Generate insights using LLM
+    insights = await generate_xlsx_database_insights(file_path, original_filename)
+    
+    # Get embedding for insights
+    insights_embedding = await get_embedding(insights)
+    
+    # Store insights in the database (you may want to create a new model for this)
+    # For now, we'll store it in the existing XLSX document
+    xlsx_doc = db.query(XLSXDocument).filter(XLSXDocument.file_id == file_id).first()
+    if xlsx_doc:
+        xlsx_doc.sheet_names = {
+            'insights': insights,
+            'insights_embedding': insights_embedding,
+            'table_name': table_name
+        }
+        db.commit()
+    
+    return table_name, insights_embedding

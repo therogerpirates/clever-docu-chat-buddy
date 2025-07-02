@@ -70,14 +70,22 @@ def save_file_to_db(file_path: str, file_type: str, description: str, rag_type: 
         # Create file record
         file_uuid = str(uuid.uuid4())
         path_obj = Path(file_path)
-        
+        # Fix: handle file_type as enum or string
+        if isinstance(file_type, FileType):
+            file_type_enum = file_type
+        else:
+            file_type_enum = FileType[file_type.upper()]
+        if isinstance(rag_type, RagType):
+            rag_type_enum = rag_type
+        else:
+            rag_type_enum = RagType(rag_type) if rag_type else None
         file_record = File(
             file_uuid=file_uuid,
             filename=path_obj.name,
             original_filename=original_filename or path_obj.name,
             file_path=str(file_path),
-            file_type=FileType[file_type.upper()],
-            rag_type=RagType(rag_type) if rag_type else None,
+            file_type=file_type_enum,
+            rag_type=rag_type_enum,
             description=description,
             uploaded_by_id=uploaded_by_id
         )
@@ -139,10 +147,9 @@ def get_embedding_with_retry(text: str, max_retries: int = MAX_RETRIES) -> List[
             logger.warning(f"Attempt {attempt + 1} failed. Retrying in {retry_delay} seconds...")
             time.sleep(retry_delay)
 
-def process_file(file_path: str, file_type: str, description: str, rag_type: str = "semantic", uploaded_by_id: int = None, original_filename: str = None) -> Dict[str, Any]:
+async def process_file(file_path: str, file_type: str, description: str, rag_type: str = "semantic", uploaded_by_id: int = None, original_filename: str = None) -> Dict[str, Any]:
     """
-    Process an uploaded file based on its type.
-    
+    Async: Process an uploaded file based on its type.
     Args:
         file_path: Path to the uploaded file
         file_type: Type of the file (pdf, csv, xlsx)
@@ -150,7 +157,6 @@ def process_file(file_path: str, file_type: str, description: str, rag_type: str
         rag_type: Type of RAG to use (default: "semantic")
         uploaded_by_id: ID of the user who uploaded the file
         original_filename: Original filename before processing
-        
     Returns:
         dict: Processing result with status and metadata
     """
@@ -158,38 +164,36 @@ def process_file(file_path: str, file_type: str, description: str, rag_type: str
     try:
         # Save file metadata to database
         file_record = save_file_to_db(file_path, file_type, description, rag_type, db, uploaded_by_id, original_filename)
-        
         # Update file status to PROCESSING
         file_record.status = FileStatus.PROCESSING
         db.commit()
-        
         # Process file based on type with retry logic
         try:
             if file_type is None:
                 raise ValueError(f"Unsupported file type for file: {file_record.original_filename}")
-
             if file_type.lower() == 'pdf':
                 from .pdf_utils import process_pdf
                 result = process_pdf(file_path, file_record.id, db)
             elif file_type.lower() == 'csv':
                 import pandas as pd
-                from .csv_utils import process_csv_with_embeddings
-                # Read the CSV file into a DataFrame
+                from .csv_utils import process_csv_for_sql_rag_with_insights
                 df = pd.read_csv(file_path)
-                # Process the CSV and save chunks to database
-                result = process_csv_with_embeddings(df, db, file_record.id)
+                if rag_type == 'sql':
+                    result = await process_csv_for_sql_rag_with_insights(df, file_record.id, file_record.original_filename, db)
+                else:
+                    raise ValueError("Semantic RAG for CSV is not supported in this pipeline. Please use SQL RAG.")
             elif file_type.lower() in ['xlsx', 'xls']:
                 import pandas as pd
-                from .xlsx_utils import process_xlsx_with_embeddings
-                # Process the XLSX and save chunks to database
-                result = process_xlsx_with_embeddings(file_path, db, file_record.id)
+                from .xlsx_utils import process_xlsx_for_sql_rag_with_insights
+                if rag_type == 'sql':
+                    result = await process_xlsx_for_sql_rag_with_insights(file_path, file_record.id, file_record.original_filename, db)
+                else:
+                    raise ValueError("Semantic RAG for XLSX is not supported in this pipeline. Please use SQL RAG.")
             else:
                 raise ValueError(f"Unsupported file type: {file_type}")
-            
             # Update file status to READY after successful processing
             file_record.status = FileStatus.READY
             db.commit()
-            
             return {
                 'status': 'success',
                 'file_id': file_record.id,
@@ -198,7 +202,6 @@ def process_file(file_path: str, file_type: str, description: str, rag_type: str
                 'message': 'File processed successfully',
                 'result': result
             }
-            
         except Exception as process_error:
             # Update file status to ERROR if processing fails
             file_record.status = FileStatus.ERROR
@@ -206,7 +209,6 @@ def process_file(file_path: str, file_type: str, description: str, rag_type: str
             db.commit()
             logger.error(f"Error processing file {file_path}: {str(process_error)}")
             raise
-            
     except Exception as e:
         db.rollback()
         logger.error(f"Error in process_file: {str(e)}")

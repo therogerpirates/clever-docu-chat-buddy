@@ -1,13 +1,14 @@
 import pandas as pd
 import json
 import logging
-import time
 import os
 from typing import List, Dict, Any, Optional
 from dotenv import load_dotenv
 from sqlalchemy.orm import Session
 
-from .models import CSVDocument, CSVChunk
+from .models import CSVDocument
+from .database import create_dynamic_table, insert_rows_to_dynamic_table, engine
+from .llm_utils import get_groq_chat
 from .utils import get_embedding
 
 # Configure logging
@@ -17,121 +18,79 @@ logger = logging.getLogger(__name__)
 # Load environment variables
 load_dotenv()
 
-EMBEDDING_RETRY_DELAY = int(os.getenv("EMBEDDING_RETRY_DELAY", "5"))  # Seconds to wait between retries
-MAX_RETRIES = int(os.getenv("EMBEDDING_MAX_RETRIES", "3"))  # Maximum number of retries for failed embeddings
+# --- Only SQL RAG logic below ---
 
-def get_embedding_with_retry(text: str, max_retries: int = MAX_RETRIES) -> List[float]:
+def process_csv_for_sql_rag(df: pd.DataFrame, file_id: int, original_filename: str):
     """
-    Get embedding for text with retry logic.
-    
+    Ingest CSV data into a dynamic SQL table for SQL RAG.
     Args:
-        text: Text to get embedding for
-        max_retries: Maximum number of retry attempts
-        
-    Returns:
-        List[float]: Embedding vector
+        df: The pandas DataFrame of the CSV
+        file_id: The file's unique ID
+        original_filename: The original filename to store in the table
     """
-    for attempt in range(max_retries):
-        try:
-            return get_embedding(text)
-        except Exception as e:
-            if attempt == max_retries - 1:  # Last attempt
-                logger.error(f"Failed to get embedding after {max_retries} attempts: {str(e)}")
-                raise
-                
-            retry_delay = EMBEDDING_RETRY_DELAY * (attempt + 1)
-            logger.warning(f"Attempt {attempt + 1} failed. Retrying in {retry_delay} seconds...")
-            time.sleep(retry_delay)
-    
-    # This should never be reached due to the raise in the loop
-    raise Exception("Failed to get embedding after multiple retries")
+    table_name = f"csv_data_{file_id}"
+    columns = [col.lower() for col in df.columns]
+    # Create the table
+    create_dynamic_table(engine, table_name, columns, original_filename=original_filename)
+    # Prepare rows as dicts with lowercased keys to match table columns
+    rows = [
+        {k.lower(): v for k, v in row.items()}
+        for row in df.to_dict(orient='records')
+    ]
+    # Insert rows (bulk insert)
+    insert_rows_to_dynamic_table(engine, table_name, columns, rows, original_filename=original_filename)
+    return table_name
 
-def save_csv_chunks_to_db(db: Session, file_id: int, chunks: List[Dict], batch_size: int = 10) -> 'CSVDocument':
-    """Save chunks to the database in batches."""
+async def generate_csv_database_insights(df: pd.DataFrame, original_filename: str) -> str:
+    """
+    Generate a concise summary for SQL RAG using only column names.
+    Args:
+        df: The pandas DataFrame of the CSV
+        original_filename: The original filename
+    Returns:
+        str: LLM-generated summary about the table's columns and possible SQL queries
+    """
     try:
-        # Create CSV document record
-        csv_doc = CSVDocument(
-            file_id=file_id,
-            row_count=len(chunks),
-            column_count=len(json.loads(chunks[0]['content'])) if chunks else 0
-        )
-        db.add(csv_doc)
+        columns = list(df.columns)
+        analysis_prompt = f"""
+You are a data analyst and SQL expert. You are analyzing a database table created from the file: {original_filename}
+
+Table Columns:
+{json.dumps(columns, indent=2)}
+
+Please provide a concise summary of what types of SQL queries could be written for this table, based only on the column names. Do not speculate about the data values. List possible query types (e.g., filtering, grouping, aggregations) and mention any columns that look like IDs, dates, or categories. Keep the summary short and focused.
+
+Use double quotes (\"column name\") for column and table names with spaces or special characters, as required by PostgreSQL. Do NOT use backticks.
+"""
+        chat = await get_groq_chat(temperature=0.2)
+        from langchain_core.messages import HumanMessage
+        response = await chat.ainvoke([HumanMessage(content=analysis_prompt)])
+        summary = response.content.strip()
+        return summary
+    except Exception as e:
+        logger.error(f"Error generating CSV database summary: {str(e)}")
+        return f"Table columns: {', '.join(columns)}."
+
+async def process_csv_for_sql_rag_with_insights(df: pd.DataFrame, file_id: int, original_filename: str, db: Session):
+    """
+    Ingest CSV data into a dynamic SQL table and generate summary for SQL RAG.
+    Args:
+        df: The pandas DataFrame of the CSV
+        file_id: The file's unique ID
+        original_filename: The original filename
+        db: Database session for storing summary
+    Returns:
+        tuple: (table_name, summary_embedding)
+    """
+    table_name = process_csv_for_sql_rag(df, file_id, original_filename)
+    summary = await generate_csv_database_insights(df, original_filename)
+    summary_embedding = get_embedding(summary)
+    csv_doc = db.query(CSVDocument).filter(CSVDocument.file_id == file_id).first()
+    if csv_doc:
+        csv_doc.header = {
+            'summary': summary,
+            'summary_embedding': summary_embedding,
+            'table_name': table_name
+        }
         db.commit()
-        db.refresh(csv_doc)
-        
-        # Save chunks in batches
-        for i in range(0, len(chunks), batch_size):
-            batch = chunks[i:i + batch_size]
-            db_chunks = [
-                CSVChunk(
-                    document_id=csv_doc.id,
-                    row_number=chunk['row_number'],
-                    content=chunk['content'],
-                    embedding=chunk['embedding']
-                )
-                for chunk in batch
-            ]
-            db.bulk_save_objects(db_chunks)
-            db.commit()
-            logger.info(f"Saved {len(db_chunks)} chunks to database (batch {i//batch_size + 1})")
-            
-        return csv_doc
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Error saving chunks to database: {str(e)}")
-        raise
-
-def process_csv_with_embeddings(df: pd.DataFrame, db: Session, file_id: int, batch_size: int = 10) -> Dict[str, Any]:
-    """Process a CSV file and generate embeddings for each row."""
-    try:
-        # Convert all string columns to lowercase
-        for col in df.columns:
-            if df[col].dtype == 'object':
-                df[col] = df[col].str.lower()
-        
-        # Get metadata
-        total_rows = len(df)
-        metadata = {
-            'row_count': total_rows,
-            'column_count': len(df.columns)
-        }
-        
-        # Process rows in batches
-        all_chunks = []
-        for idx, row in df.iterrows():
-            try:
-                # Convert row to string representation
-                row_content = row.to_dict()
-                content_str = json.dumps(row_content, ensure_ascii=False)
-                
-                # Get embedding for the row with retry logic
-                embedding = get_embedding_with_retry(content_str)
-                
-                all_chunks.append({
-                    'row_number': idx + 1,  # 1-based indexing
-                    'content': content_str,
-                    'embedding': embedding
-                })
-                
-                # Log progress
-                if (idx + 1) % 10 == 0 or (idx + 1) == total_rows:
-                    logger.info(f"Processed {idx + 1}/{total_rows} rows ({(idx + 1)/total_rows:.1%})")
-                    
-            except Exception as e:
-                logger.error(f"Error processing row {idx + 1}: {str(e)}")
-                continue
-        
-        # Save chunks to database
-        if all_chunks:
-            csv_doc = save_csv_chunks_to_db(db, file_id, all_chunks, batch_size)
-            metadata['csv_document_id'] = csv_doc.id
-        
-        return {
-            'status': 'success',
-            'metadata': metadata,
-            'chunks_processed': len(all_chunks)
-        }
-        
-    except Exception as e:
-        logger.error(f"Error processing CSV with embeddings: {str(e)}")
-        raise
+    return table_name, summary_embedding
