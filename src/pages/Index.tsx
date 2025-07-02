@@ -138,59 +138,43 @@ const Index = () => {
     }
   };
 
+  const hasMessages = messages.length > 0;
+
   return (
-    <div className="min-h-screen bg-gradient-main">
+    <div className="min-h-screen bg-background">
       <NavigationHeader />
       
-      <div className="container mx-auto px-4 py-6">
-        <div className="max-w-4xl mx-auto h-[calc(100vh-8rem)]">
-          {/* Chat Interface */}
-          <Card className="h-full flex flex-col border-border shadow-lg">
-            {/* Chat Header */}
-            <div className="p-4 border-b border-border bg-muted/30 rounded-t-lg">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <Bot className="w-5 h-5 text-primary" />
-                  <h2 className="font-semibold text-foreground">Document Assistant</h2>
-                </div>
-                <div className="text-sm text-muted-foreground">
-                  Chat with AI Assistant
-                </div>
+      <div className="flex flex-col h-[calc(100vh-4rem)]">
+        {!hasMessages ? (
+          // Centered initial state (like ChatGPT)
+          <div className="flex-1 flex flex-col items-center justify-center px-4">
+            <div className="w-full max-w-2xl space-y-6 animate-fade-in">
+              <div className="text-center space-y-2">
+                <Bot className="w-12 h-12 mx-auto text-primary animate-pulse" />
+                <h1 className="text-2xl font-semibold text-foreground">
+                  Document Assistant
+                </h1>
+                <p className="text-muted-foreground">
+                  Ask me anything about your documents
+                </p>
               </div>
-            </div>
-
-            {/* Messages */}
-            <ScrollArea className="flex-1 p-4">
-              <div className="space-y-4">
-                {messages.map((message) => (
-                  <ChatMessage key={message.id} message={message} />
-                ))}
-                {isLoading && (
-                  <div className="flex items-center gap-2 text-muted-foreground">
-                    <Bot className="w-4 h-4 animate-pulse" />
-                    <span className="text-sm">AI is thinking...</span>
-                  </div>
-                )}
-                <div ref={messagesEndRef} />
-              </div>
-            </ScrollArea>
-
-            {/* Input Area */}
-            <div className="p-4 border-t border-border bg-muted/30">
-              <div className="flex gap-2">
+              
+              {/* Centered Input */}
+              <div className="relative">
                 <Input
                   value={inputMessage}
                   onChange={(e) => setInputMessage(e.target.value)}
                   onKeyPress={handleKeyPress}
-                  placeholder="Ask about your documents..."
+                  placeholder="Message Document Assistant..."
                   disabled={isLoading}
-                  className="flex-1"
+                  className="w-full pr-12 py-3 text-base border-2 border-border focus:border-primary transition-all duration-200 shadow-sm hover:shadow-md"
                   data-lov-id="chat-input"
                 />
                 <Button 
                   onClick={handleSendMessage}
                   disabled={!inputMessage.trim() || isLoading}
-                  className="bg-primary hover:bg-primary/90"
+                  size="sm"
+                  className="absolute right-2 top-1/2 -translate-y-1/2 h-8 w-8 p-0 bg-primary hover:bg-primary/90 transition-all duration-200"
                 >
                   {isLoading ? (
                     <Loader2 className="w-4 h-4 animate-spin" />
@@ -200,8 +184,66 @@ const Index = () => {
                 </Button>
               </div>
             </div>
-          </Card>
-        </div>
+          </div>
+        ) : (
+          // Chat mode (like ChatGPT with messages)
+          <>
+            {/* Messages Area */}
+            <div className="flex-1 overflow-hidden">
+              <ScrollArea className="h-full">
+                <div className="max-w-3xl mx-auto px-4 py-6 space-y-6 animate-fade-in">
+                  {messages.map((message) => (
+                    <ChatMessage key={message.id} message={message} />
+                  ))}
+                  {isLoading && (
+                    <div className="flex items-start gap-3 animate-fade-in">
+                      <div className="w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center">
+                        <Bot className="w-4 h-4 text-primary animate-pulse" />
+                      </div>
+                      <div className="bg-card border border-border rounded-lg p-3">
+                        <div className="flex items-center gap-2">
+                          <div className="w-2 h-2 bg-muted-foreground rounded-full animate-bounce"></div>
+                          <div className="w-2 h-2 bg-muted-foreground rounded-full animate-bounce" style={{ animationDelay: '0.1s' }}></div>
+                          <div className="w-2 h-2 bg-muted-foreground rounded-full animate-bounce" style={{ animationDelay: '0.2s' }}></div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                  <div ref={messagesEndRef} />
+                </div>
+              </ScrollArea>
+            </div>
+
+            {/* Bottom Input */}
+            <div className="border-t border-border bg-background/80 backdrop-blur-sm">
+              <div className="max-w-3xl mx-auto p-4">
+                <div className="relative">
+                  <Input
+                    value={inputMessage}
+                    onChange={(e) => setInputMessage(e.target.value)}
+                    onKeyPress={handleKeyPress}
+                    placeholder="Message Document Assistant..."
+                    disabled={isLoading}
+                    className="w-full pr-12 py-3 text-base border-2 border-border focus:border-primary transition-all duration-200 shadow-sm hover:shadow-md"
+                    data-lov-id="chat-input"
+                  />
+                  <Button 
+                    onClick={handleSendMessage}
+                    disabled={!inputMessage.trim() || isLoading}
+                    size="sm"
+                    className="absolute right-2 top-1/2 -translate-y-1/2 h-8 w-8 p-0 bg-primary hover:bg-primary/90 transition-all duration-200"
+                  >
+                    {isLoading ? (
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                    ) : (
+                      <Send className="w-4 h-4" />
+                    )}
+                  </Button>
+                </div>
+              </div>
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
