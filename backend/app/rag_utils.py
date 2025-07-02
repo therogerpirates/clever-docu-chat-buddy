@@ -3,7 +3,7 @@ import json
 from typing import List, Dict, Any, Optional, Tuple, Union
 from sqlalchemy.orm import Session, joinedload
 import numpy as np
-from .models import PDFChunk, CSVChunk, XLSXChunk, File, PDFDocument, CSVDocument, XLSXDocument
+from .models import PDFChunk, CSVChunk, XLSXChunk, File, PDFDocument, CSVDocument, XLSXDocument, WebsiteChunk, WebsiteDocument
 from .llm_utils import get_embedding, get_groq_chat
 from sqlalchemy import or_
 
@@ -44,7 +44,8 @@ class VectorStore:
         query: str, 
         limit: int = 5,
         min_score: float = 0.5,
-        file_type: Optional[str] = None
+        file_type: Optional[str] = None,
+        current_user: Optional[Any] = None
     ) -> List[Dict[str, Any]]:
         """
         Perform semantic search across all document chunks using stored embeddings.
@@ -54,11 +55,18 @@ class VectorStore:
             limit: Maximum number of results to return
             min_score: Minimum similarity score (0-1)
             file_type: Optional file type filter ('pdf', 'csv', 'xlsx')
+            current_user: The current user for access control
             
         Returns:
             List of dictionaries containing chunk information and similarity scores
         """
         try:
+            logger.info(f"Starting semantic search for query: {query}")
+            if current_user:
+                logger.info(f"Current user: {current_user.username} (ID: {current_user.id}, Role: {current_user.role})")
+            else:
+                logger.info("No current user provided, applying admin-level access")
+            
             # Get query embedding
             query_embedding = await get_embedding(query)
             if not query_embedding:
@@ -69,22 +77,65 @@ class VectorStore:
             
             # Search in PDF chunks
             if file_type is None or file_type.lower() == 'pdf':
-                pdf_chunks = self.db.query(PDFChunk).options(
-                    joinedload(PDFChunk.document).joinedload(PDFDocument.file)
-                ).all()
+                logger.info("Searching in PDF chunks...")
                 
+                # First, get all PDF chunks with their document and file relationships
+                base_query = self.db.query(PDFChunk).options(
+                    joinedload(PDFChunk.document).joinedload(PDFDocument.file)
+                )
+                
+                # Apply access control based on user role
+                if current_user and current_user.role != 'admin':
+                    logger.info(f"Applying access control for user {current_user.username} (ID: {current_user.id})")
+                    
+                    # Get files that are either not restricted or restricted to this user
+                    accessible_files = self.db.query(File).filter(
+                        or_(
+                            File.restricted_users.any(id=current_user.id),
+                            ~File.restricted_users.any()  # No restrictions
+                        )
+                    ).subquery()
+                    
+                    # Get PDF documents for accessible files
+                    accessible_docs = self.db.query(PDFDocument).join(
+                        accessible_files, 
+                        accessible_files.c.id == PDFDocument.file_id
+                    ).subquery()
+                    
+                    # Get chunks for accessible documents
+                    query = base_query.join(
+                        accessible_docs,
+                        PDFChunk.document_id == accessible_docs.c.id
+                    )
+                    
+                    logger.debug(f"Access control query for user {current_user.id} applied")
+                else:
+                    # Admin or no user - get all chunks
+                    query = base_query
+                
+                # Execute the query
+                pdf_chunks = query.all()
+                logger.info(f"Found {len(pdf_chunks)} PDF chunks after access control")
+                
+                # Process chunks and calculate similarities
                 for chunk in pdf_chunks:
                     try:
                         if not chunk.embedding:
+                            logger.debug(f"Skipping chunk {chunk.id} - no embedding")
                             continue
                             
                         # Convert JSON string to list if needed
                         chunk_embedding = chunk.embedding
                         if isinstance(chunk_embedding, str):
-                            chunk_embedding = json.loads(chunk_embedding)
+                            try:
+                                chunk_embedding = json.loads(chunk_embedding)
+                            except json.JSONDecodeError as e:
+                                logger.error(f"Error parsing embedding for chunk {chunk.id}: {e}")
+                                continue
                             
                         # Calculate similarity
                         similarity = self._cosine_similarity(query_embedding, chunk_embedding)
+                        logger.debug(f"Chunk {chunk.id} similarity: {similarity:.4f}")
                         
                         if similarity >= min_score:
                             results.append({
@@ -94,28 +145,71 @@ class VectorStore:
                                 'type': 'PDF',
                                 'filename': chunk.document.file.original_filename,
                                 'chunk_id': chunk.id,
-                                'document_id': chunk.document_id
+                                'document_id': chunk.document_id,
+                                'file': chunk.document.file  # Include file for access control
                             })
                     except Exception as e:
                         logger.error(f"Error processing PDF chunk {chunk.id}: {str(e)}")
                         continue
             
-            # Search in CSV chunks (similar pattern as above)
+            # Search in CSV chunks
             if file_type is None or file_type.lower() == 'csv':
-                csv_chunks = self.db.query(CSVChunk).options(
+                logger.info("Searching in CSV chunks...")
+                
+                # Base query to get all CSV chunks with their relationships
+                base_query = self.db.query(CSVChunk).options(
                     joinedload(CSVChunk.document).joinedload(CSVDocument.file)
-                ).all()
+                )
+                
+                # Apply access control based on user role
+                if current_user and current_user.role != 'admin':
+                    logger.info(f"Applying access control for user {current_user.username} in CSV search")
+                    
+                    # Get files that are either not restricted or restricted to this user
+                    accessible_files = self.db.query(File).filter(
+                        or_(
+                            File.restricted_users.any(id=current_user.id),
+                            ~File.restricted_users.any()  # No restrictions
+                        )
+                    ).subquery()
+                    
+                    # Get CSV documents for accessible files
+                    accessible_docs = self.db.query(CSVDocument).join(
+                        accessible_files, 
+                        accessible_files.c.id == CSVDocument.file_id
+                    ).subquery()
+                    
+                    # Get chunks for accessible documents
+                    query = base_query.join(
+                        accessible_docs,
+                        CSVChunk.document_id == accessible_docs.c.id
+                    )
+                    
+                    logger.debug(f"CSV access control query for user {current_user.id} applied")
+                else:
+                    # Admin or no user - get all chunks
+                    query = base_query
+                
+                # Execute the query
+                csv_chunks = query.all()
+                logger.info(f"Found {len(csv_chunks)} CSV chunks after access control")
                 
                 for chunk in csv_chunks:
                     try:
                         if not chunk.embedding:
+                            logger.debug(f"Skipping CSV chunk {chunk.id} - no embedding")
                             continue
                             
                         chunk_embedding = chunk.embedding
                         if isinstance(chunk_embedding, str):
-                            chunk_embedding = json.loads(chunk_embedding)
+                            try:
+                                chunk_embedding = json.loads(chunk_embedding)
+                            except json.JSONDecodeError as e:
+                                logger.error(f"Error parsing embedding for CSV chunk {chunk.id}: {e}")
+                                continue
                             
                         similarity = self._cosine_similarity(query_embedding, chunk_embedding)
+                        logger.debug(f"CSV Chunk {chunk.id} similarity: {similarity:.4f}")
                         
                         if similarity >= min_score:
                             results.append({
@@ -125,28 +219,71 @@ class VectorStore:
                                 'type': 'CSV',
                                 'filename': chunk.document.file.original_filename,
                                 'chunk_id': chunk.id,
-                                'document_id': chunk.document_id
+                                'document_id': chunk.document_id,
+                                'file': chunk.document.file  # Include file for access control
                             })
                     except Exception as e:
                         logger.error(f"Error processing CSV chunk {chunk.id}: {str(e)}")
                         continue
             
-            # Search in XLSX chunks (similar pattern as above)
+            # Search in XLSX chunks
             if file_type is None or file_type.lower() == 'xlsx':
-                xlsx_chunks = self.db.query(XLSXChunk).options(
+                logger.info("Searching in XLSX chunks...")
+                
+                # Base query to get all XLSX chunks with their relationships
+                base_query = self.db.query(XLSXChunk).options(
                     joinedload(XLSXChunk.document).joinedload(XLSXDocument.file)
-                ).all()
+                )
+                
+                # Apply access control based on user role
+                if current_user and current_user.role != 'admin':
+                    logger.info(f"Applying access control for user {current_user.username} in XLSX search")
+                    
+                    # Get files that are either not restricted or restricted to this user
+                    accessible_files = self.db.query(File).filter(
+                        or_(
+                            File.restricted_users.any(id=current_user.id),
+                            ~File.restricted_users.any()  # No restrictions
+                        )
+                    ).subquery()
+                    
+                    # Get XLSX documents for accessible files
+                    accessible_docs = self.db.query(XLSXDocument).join(
+                        accessible_files, 
+                        accessible_files.c.id == XLSXDocument.file_id
+                    ).subquery()
+                    
+                    # Get chunks for accessible documents
+                    query = base_query.join(
+                        accessible_docs,
+                        XLSXChunk.document_id == accessible_docs.c.id
+                    )
+                    
+                    logger.debug(f"XLSX access control query for user {current_user.id} applied")
+                else:
+                    # Admin or no user - get all chunks
+                    query = base_query
+                
+                # Execute the query
+                xlsx_chunks = query.all()
+                logger.info(f"Found {len(xlsx_chunks)} XLSX chunks after access control")
                 
                 for chunk in xlsx_chunks:
                     try:
                         if not chunk.embedding:
+                            logger.debug(f"Skipping XLSX chunk {chunk.id} - no embedding")
                             continue
                             
                         chunk_embedding = chunk.embedding
                         if isinstance(chunk_embedding, str):
-                            chunk_embedding = json.loads(chunk_embedding)
+                            try:
+                                chunk_embedding = json.loads(chunk_embedding)
+                            except json.JSONDecodeError as e:
+                                logger.error(f"Error parsing embedding for XLSX chunk {chunk.id}: {e}")
+                                continue
                             
                         similarity = self._cosine_similarity(query_embedding, chunk_embedding)
+                        logger.debug(f"XLSX Chunk {chunk.id} similarity: {similarity:.4f}")
                         
                         if similarity >= min_score:
                             results.append({
@@ -156,10 +293,74 @@ class VectorStore:
                                 'type': 'XLSX',
                                 'filename': chunk.document.file.original_filename,
                                 'chunk_id': chunk.id,
-                                'document_id': chunk.document_id
+                                'document_id': chunk.document_id,
+                                'file': chunk.document.file  # Include file for access control
                             })
                     except Exception as e:
                         logger.error(f"Error processing XLSX chunk {chunk.id}: {str(e)}")
+                        continue
+            
+            # Search in Website chunks
+            if file_type is None or file_type.lower() == 'website':
+                logger.info("Searching in Website chunks...")
+
+                # Base query to get all Website chunks with their relationships
+                base_query = self.db.query(WebsiteChunk).options(
+                    joinedload(WebsiteChunk.document).joinedload(WebsiteDocument.file)
+                )
+
+                # Apply access control based on user role
+                if current_user and current_user.role != 'admin':
+                    logger.info(f"Applying access control for user {current_user.username} in Website search")
+                    accessible_files = self.db.query(File).filter(
+                        or_(
+                            File.restricted_users.any(id=current_user.id),
+                            ~File.restricted_users.any()  # No restrictions
+                        )
+                    ).subquery()
+                    accessible_docs = self.db.query(WebsiteDocument).join(
+                        accessible_files,
+                        accessible_files.c.id == WebsiteDocument.file_id
+                    ).subquery()
+                    query = base_query.join(
+                        accessible_docs,
+                        WebsiteChunk.document_id == accessible_docs.c.id
+                    )
+                    logger.debug(f"Website access control query for user {current_user.id} applied")
+                else:
+                    query = base_query
+
+                website_chunks = query.all()
+                logger.info(f"Found {len(website_chunks)} Website chunks after access control")
+
+                for chunk in website_chunks:
+                    try:
+                        if not chunk.embedding:
+                            logger.debug(f"Skipping Website chunk {chunk.id} - no embedding")
+                            continue
+                        chunk_embedding = chunk.embedding
+                        if isinstance(chunk_embedding, str):
+                            try:
+                                chunk_embedding = json.loads(chunk_embedding)
+                            except json.JSONDecodeError as e:
+                                logger.error(f"Error parsing embedding for Website chunk {chunk.id}: {e}")
+                                continue
+                        similarity = self._cosine_similarity(query_embedding, chunk_embedding)
+                        logger.info(f"Website Chunk {chunk.id} similarity: {similarity:.4f} (min_score={min_score})")
+                        if similarity >= min_score:
+                            # Use URL as filename, and chunk index as source
+                            results.append({
+                                'content': chunk.content,
+                                'score': similarity,
+                                'source': f"Chunk {chunk.chunk_index}",
+                                'type': 'WEBSITE',
+                                'filename': chunk.document.file.original_filename if chunk.document and chunk.document.file else (chunk.document.url if chunk.document else 'Unknown'),
+                                'chunk_id': chunk.id,
+                                'document_id': chunk.document_id,
+                                'file': chunk.document.file if chunk.document and chunk.document.file else None
+                            })
+                    except Exception as e:
+                        logger.error(f"Error processing Website chunk {chunk.id}: {str(e)}")
                         continue
             
             # Sort results by score in descending order
@@ -284,7 +485,7 @@ async def generate_insights_from_chunks(
         
         # Get the chat model
         logger.info(f"Initializing chat model: {model_name or 'default'}")
-        chat = get_groq_chat(model_name=model_name)
+        chat = await get_groq_chat(model_name=model_name)
         
         # Generate the response
         logger.info("Generating response...")
@@ -301,7 +502,11 @@ async def generate_insights_from_chunks(
         result = await chat.agenerate([messages])
         
         # Extract the response text
-        response_text = result.generations[0][0].text
+        if hasattr(result, 'generations') and result.generations and len(result.generations) > 0 and len(result.generations[0]) > 0:
+            response_text = result.generations[0][0].text
+        else:
+            logger.error(f"Unexpected response format from chat model: {result}")
+            response_text = "I'm sorry, I encountered an error generating a response. Please try again later."
         logger.info("Response generated successfully")
         
         # Extract and format sources from the chunks
@@ -309,19 +514,56 @@ async def generate_insights_from_chunks(
         seen_sources = set()
         
         for chunk in chunks:
-            source_key = f"{chunk['filename']} ({chunk['source']})"
-            if source_key not in seen_sources:
-                seen_sources.add(source_key)
-                sources.append(source_key)
+            try:
+                # Get filename and source, with fallbacks
+                filename = chunk.get('filename', 'Unknown Document')
+                source = chunk.get('source', 'N/A')
+                source_key = f"{filename} ({source})"
+                
+                # Only add unique sources
+                if source_key not in seen_sources:
+                    seen_sources.add(source_key)
+                    sources.append({
+                        'filename': filename,
+                        'source': source,
+                        'type': chunk.get('type', 'Unknown')
+                    })
+            except Exception as e:
+                logger.error(f"Error processing chunk for sources: {str(e)}")
+                continue
+        
+        # Format sources as strings for the frontend
+        formatted_sources = []
+        for src in sources:
+            try:
+                source_str = f"{src.get('filename', 'Unknown Document')}"
+                if 'source' in src and src['source']:
+                    source_str += f" (Page {src['source']})"
+                if 'type' in src and src['type']:
+                    source_str += f" - {src['type']}"
+                formatted_sources.append(source_str)
+            except Exception as e:
+                logger.error(f"Error formatting source {src}: {str(e)}")
+                formatted_sources.append("Unknown source")
+        
+        # Log the response and sources for debugging
+        logger.debug(f"Generated response text: {response_text}")
+        logger.debug(f"Formatted sources: {formatted_sources}")
         
         # Ensure sources are listed in the response
-        if "SOURCES:" not in response_text.upper() and sources:
-            response_text += "\n\nSOURCES:\n" + "\n".join(f"- {src}" for src in sources)
+        if "SOURCES:" not in response_text.upper() and formatted_sources:
+            sources_text = "\n".join([f"- {src}" for src in formatted_sources])
+            response_text += f"\n\nSOURCES:\n{sources_text}"
         
-        return {
+        # Format the response
+        response_data = {
             "response": response_text,
-            "sources": sources
+            "sources": formatted_sources,  # Now sending strings instead of objects
+            "success": True
         }
+        
+        logger.debug(f"Returning response data: {json.dumps(response_data, indent=2)}")
+        return response_data
         
     except Exception as e:
         error_msg = f"Error in generate_insights_from_chunks: {str(e)}"
@@ -336,7 +578,11 @@ async def generate_insights_from_chunks(
                 for chunk in chunks
             ]))
             
-        return {
+        error_response = {
             "response": f"I encountered an error while generating a response: {str(e)}",
-            "sources": sources
+            "sources": sources,
+            "success": False,
+            "error": str(e)
         }
+        logger.error(f"Error response: {json.dumps(error_response, indent=2)}")
+        return error_response

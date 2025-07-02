@@ -3,6 +3,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { apiRequest } from "@/lib/api";
 import { Bot, User, Send, Loader2 } from "lucide-react";
 import { ChatMessage, type ChatMessageType } from "@/components/ChatMessage";
 import { useToast } from "@/components/ui/use-toast";
@@ -50,18 +51,9 @@ const Index = () => {
     setIsLoading(true);
 
     try {
-      // Call the backend API
-      const apiUrl = 'http://localhost:8000/api/chat';
-      console.log('Sending request to:', apiUrl);
-      
-      const response = await fetch(apiUrl, {
+      // Call the backend API using apiRequest which handles authentication
+      const data = await apiRequest('/api/chat', {
         method: 'POST',
-        mode: 'cors',
-        credentials: 'include',
-        headers: {
-          'Content-Type': 'application/json',
-          'Accept': 'application/json',
-        },
         body: JSON.stringify({
           messages: [...messages, userMessage].map(msg => ({
             role: msg.role,
@@ -70,16 +62,13 @@ const Index = () => {
           system_prompt: SYSTEM_PROMPT,
         }),
       });
-
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.detail || 'Failed to get response from server');
-      }
-
-      const data = await response.json();
       
       // Add AI response to messages
       console.log('API Response:', data); // Log the full response for debugging
+      
+      if (!data) {
+        throw new Error('No response data received from server');
+      }
       
       const botMessage: ChatMessageType = {
         id: `ai-${Date.now()}`,
@@ -105,10 +94,30 @@ const Index = () => {
       console.error('Error sending message:', error);
       
       let errorMessage = 'Failed to send message';
+      let errorDetails = '';
+      
       if (error instanceof Error) {
-        errorMessage = error.message;
+        console.error('Error details:', {
+          name: error.name,
+          message: error.message,
+          stack: error.stack,
+          // @ts-ignore - Accessing non-standard properties
+          status: error.status,
+          // @ts-ignore - Accessing non-standard properties
+          data: error.data
+        });
+        
+        errorMessage = error.message || 'An unknown error occurred';
+        
+        // Handle network errors
         if (error.name === 'TypeError' && error.message.includes('Failed to fetch')) {
           errorMessage = 'Failed to connect to the server. Please check if the backend is running and accessible.';
+        } 
+        // Handle API errors with status codes
+        // @ts-ignore - Accessing non-standard properties
+        else if (error.status) {
+          // @ts-ignore - Accessing non-standard properties
+          errorDetails = `Status: ${error.status} - ${error.data?.error || error.data?.message || 'Unknown error'}`;
         }
       }
       

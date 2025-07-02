@@ -15,7 +15,7 @@ interface FileItemProps {
     name: string;
     type: "pdf" | "csv" | "xlsx" | "url";
     description: string;
-    ragType?: "numerical" | "semantic";
+    ragType?: "sql" | "semantic";
     uploadDate: Date;
     status: "processing" | "ready" | "error";
     size?: string;
@@ -121,7 +121,7 @@ const FileItem: React.FC<FileItemProps> = ({ file, onDelete, onReupload, onStatu
                 
                 {file.ragType && (
                   <Badge variant="secondary" className="text-xs">
-                    {file.ragType === "numerical" ? "SQL RAG" : "Semantic RAG"}
+                    {file.ragType === "sql" ? "SQL RAG" : "Semantic RAG"}
                   </Badge>
                 )}
                 

@@ -21,6 +21,7 @@ class FileType(enum.Enum):
     CSV = "csv"
     XLSX = "xlsx"
     PDF = "pdf"
+    WEBSITE = "website"  # Changed from "WEBSITE" to match other lowercase values
 
 class FileStatus(enum.Enum):
     PROCESSING = "PROCESSING"
@@ -55,6 +56,7 @@ class User(Base):
     # Relationships
     uploaded_files = relationship("File", back_populates="uploaded_by")
     restricted_files = relationship("File", secondary=file_restrictions, back_populates="restricted_users")
+    uploaded_websites = relationship("WebsiteDocument", back_populates="uploaded_by")
 
 class File(Base):
     __tablename__ = "files"
@@ -72,6 +74,12 @@ class File(Base):
     uploaded_by_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    file_metadata = Column(JSON, nullable=True)
+    file_size = Column(Integer, nullable=True)
+    page_count = Column(Integer, nullable=True)
+    chunk_count = Column(Integer, nullable=True)
+    is_processed = Column(Boolean, default=False)
+    processing_error = Column(Text, nullable=True)
     
     # Relationships
     uploaded_by = relationship("User", back_populates="uploaded_files")
@@ -80,6 +88,7 @@ class File(Base):
     pdf_document = relationship("PDFDocument", back_populates="file", uselist=False, cascade="all, delete-orphan")
     csv_document = relationship("CSVDocument", back_populates="file", uselist=False, cascade="all, delete-orphan")
     xlsx_document = relationship("XLSXDocument", back_populates="file", uselist=False, cascade="all, delete-orphan")
+    website_document = relationship("WebsiteDocument", back_populates="file", uselist=False, cascade="all, delete-orphan")
 
 # ... keep existing code (ProcessedData, PDFDocument, PDFChunk, CSVDocument, CSVChunk, XLSXDocument, XLSXChunk classes)
 class ProcessedData(Base):
@@ -103,6 +112,7 @@ class PDFDocument(Base):
     title = Column(String, nullable=True)
     author = Column(String, nullable=True)
     page_count = Column(Integer, nullable=True)
+    document_metadata = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -131,6 +141,7 @@ class CSVDocument(Base):
     file_id = Column(Integer, ForeignKey("files.id", ondelete="CASCADE"), unique=True)
     row_count = Column(Integer, nullable=False)
     column_count = Column(Integer, nullable=False)
+    header = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -160,6 +171,7 @@ class XLSXDocument(Base):
     sheet_count = Column(Integer, nullable=False)
     row_count = Column(Integer, nullable=False)
     column_count = Column(Integer, nullable=False)
+    sheet_names = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -180,3 +192,42 @@ class XLSXChunk(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     document = relationship("XLSXDocument", back_populates="chunks")
+
+
+class WebsiteDocument(Base):
+    __tablename__ = "website_documents"
+    __table_args__ = {'sqlite_autoincrement': True}
+    
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    file_id = Column(Integer, ForeignKey("files.id", ondelete="CASCADE"), unique=True)
+    uploaded_by_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    url = Column(String, nullable=False, unique=True, index=True)
+    title = Column(String, nullable=True)
+    description = Column(Text, nullable=True)
+    domain = Column(String, nullable=True, index=True)
+    status = Column(String, default="pending")  # pending, processed, error
+    rag_type = Column(Enum(RagType), nullable=True, default=RagType.SEMANTIC)
+    error_message = Column(Text, nullable=True)
+    document_metadata = Column(JSON, nullable=True)  # Store additional metadata like headers, status code, etc.
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    file = relationship("File", back_populates="website_document")
+    uploaded_by = relationship("User", back_populates="uploaded_websites")
+    chunks = relationship("WebsiteChunk", back_populates="document", cascade="all, delete-orphan")
+
+
+class WebsiteChunk(Base):
+    __tablename__ = "website_chunks"
+    __table_args__ = {'sqlite_autoincrement': True}
+    
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    document_id = Column(Integer, ForeignKey("website_documents.id", ondelete="CASCADE"))
+    chunk_index = Column(Integer, nullable=False)
+    content = Column(Text, nullable=False)
+    embedding = Column(JSON, nullable=False)
+    chunk_metadata = Column(JSON, nullable=True)  # Can store section, word count, etc.
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    document = relationship("WebsiteDocument", back_populates="chunks")

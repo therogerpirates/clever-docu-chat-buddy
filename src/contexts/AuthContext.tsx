@@ -45,22 +45,31 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, []);
 
   const checkAuthStatus = async () => {
+    const token = localStorage.getItem('access_token');
+    if (!token) {
+      setIsLoading(false);
+      return;
+    }
+
     try {
-      const token = localStorage.getItem('access_token');
-      if (!token) {
-        setIsLoading(false);
-        return;
+      const response = await fetch(`${import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'}/api/auth/me`, {
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        credentials: 'include',
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to fetch user data');
       }
 
-      const userData = await apiRequest('/api/auth/me', {
-        headers: {
-          Authorization: `Bearer ${token}`
-        }
-      });
+      const userData = await response.json();
       setUser(userData);
     } catch (error) {
       console.error('Auth check failed:', error);
       localStorage.removeItem('access_token');
+      setUser(null);
     } finally {
       setIsLoading(false);
     }
@@ -68,14 +77,31 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const login = async (username: string, password: string) => {
     try {
-      const response = await apiRequest('/api/auth/login', {
+      const response = await fetch(`${import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'}/api/auth/login`, {
         method: 'POST',
-        body: JSON.stringify({ username, password })
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        credentials: 'include',
+        body: JSON.stringify({ username, password }),
       });
 
-      localStorage.setItem('access_token', response.access_token);
-      setUser(response.user);
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.detail || 'Login failed');
+      }
+
+      const data = await response.json();
+      
+      // Store the token and user data
+      if (data.access_token) {
+        localStorage.setItem('access_token', data.access_token);
+        setUser(data.user);
+      } else {
+        throw new Error('No access token received');
+      }
     } catch (error) {
+      console.error('Login error:', error);
       throw error;
     }
   };

@@ -19,6 +19,10 @@ load_dotenv()
 OLLAMA_API_BASE = os.getenv("OLLAMA_API_BASE", "http://localhost:11434")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "bge-m3:latest")
 
+# Constants for embedding retry logic
+EMBEDDING_RETRY_DELAY = int(os.getenv("EMBEDDING_RETRY_DELAY", "5"))  # Seconds to wait between retries
+MAX_RETRIES = int(os.getenv("EMBEDDING_MAX_RETRIES", "3"))  # Maximum number of retries
+
 
 def extract_pdf_metadata(pdf_path: str) -> Dict[str, Any]:
     """Extract metadata from a PDF file."""
@@ -168,11 +172,8 @@ def process_pdf(pdf_path: str, file_id: int, db: Session) -> Dict[str, Any]:
         # Final commit for any remaining chunks
         db.commit()
         
-        # Update file record with processing status
-        file = db.query(File).filter(File.id == file_id).first()
-        if file:
-            file.processed = True
-            db.commit()
+        # The file status is updated in the calling function (process_file in utils.py)
+        # No need to update it here as well
         
         processing_time = time.time() - start_time
         logger.info(f"Completed PDF processing in {processing_time:.2f} seconds. Processed {total_chunks} chunks.")

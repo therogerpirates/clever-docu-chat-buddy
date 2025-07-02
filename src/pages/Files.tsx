@@ -5,11 +5,11 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { NavigationHeader } from "@/components/NavigationHeader";
-import { FileItem } from "@/components/FileItem";
+import FileItem from "@/components/FileItem";
 import { Search, Upload, Database, Loader2 } from "lucide-react";
 import { Link } from "react-router-dom";
 import { toast } from "@/components/ui/use-toast";
-import { fetchFiles as apiFetchFiles, deleteFile as apiDeleteFile } from "@/lib/api";
+import { fetchFiles as apiFetchFiles, deleteFile as apiDeleteFile, reprocessFile as apiReprocessFile } from "@/lib/api";
 
 interface FileData {
   id: string | number;
@@ -17,7 +17,7 @@ interface FileData {
   name: string;
   type: "pdf" | "csv" | "xlsx" | "url";
   description: string;
-  rag_type?: "numerical" | "semantic";
+  rag_type?: "sql" | "semantic";
   upload_date: string;
   status: "processing" | "ready" | "error";
   size?: string;
@@ -45,7 +45,33 @@ const Files = () => {
       setFiles(Array.isArray(data) ? data : []);
     } catch (error) {
       console.error('Error fetching files:', error);
-      const errorMessage = error instanceof Error ? error.message : 'Failed to load files';
+      // Extract error message from different error formats
+      let errorMessage = 'Failed to load files';
+      
+      if (error instanceof Error) {
+        // If error has a data property with error details
+        if ((error as any).data) {
+          const errorData = (error as any).data;
+          if (errorData.details) {
+            errorMessage = errorData.details;
+          } else if (errorData.error) {
+            errorMessage = errorData.error;
+          } else if (errorData.message) {
+            errorMessage = errorData.message;
+          } else if (typeof errorData === 'string') {
+            errorMessage = errorData;
+          } else if (typeof errorData === 'object') {
+            errorMessage = JSON.stringify(errorData);
+          }
+        } else {
+          errorMessage = error.message || errorMessage;
+        }
+      } else if (typeof error === 'string') {
+        errorMessage = error;
+      } else if (error && typeof error === 'object') {
+        errorMessage = JSON.stringify(error);
+      }
+      
       toast({
         title: "Error",
         description: errorMessage,
@@ -92,11 +118,33 @@ const Files = () => {
     );
   };
 
-  // Handle re-upload (if needed)
-  const handleReupload = (fileId: string | number) => {
-    // This is a placeholder - implement actual re-upload logic if needed
-    console.log('Re-uploading file:', fileId);
-    // You would typically call an API endpoint to trigger reprocessing
+  // Re-process a file
+  const handleReupload = async (fileId: string | number) => {
+    try {
+      // Optimistically update the UI to show processing status
+      handleStatusChange(fileId, 'processing');
+      
+      await apiReprocessFile(fileId);
+      
+      toast({
+        title: "Reprocessing Started",
+        description: "The file is being reprocessed. Its status will update automatically.",
+      });
+
+      // Refresh the file list to get the latest statuses
+      setTimeout(fetchFiles, 3000); // Give backend some time to start processing
+
+    } catch (error) {
+      console.error('Error reprocessing file:', error);
+      const errorMessage = error instanceof Error ? error.message : 'Failed to reprocess file';
+      toast({
+        title: "Error",
+        description: errorMessage,
+        variant: "destructive",
+      });
+      // Revert status on error by refetching all files
+      fetchFiles();
+    }
   };
 
   // Load files on component mount
@@ -264,7 +312,7 @@ const Files = () => {
                   name: file.name,
                   type: file.type as "pdf" | "csv" | "xlsx" | "url",
                   description: file.description || '',
-                  ragType: file.rag_type as "numerical" | "semantic" | undefined,
+                  ragType: file.rag_type as "sql" | "semantic" | undefined,
                   uploadDate: new Date(file.upload_date),
                   status: file.status,
                   size: file.size,

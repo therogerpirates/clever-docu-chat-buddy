@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>CORS Test</title>
+    <script>
+        async function testCors() {
+            const resultDiv = document.getElementById('result');
+            resultDiv.innerHTML = 'Testing CORS...';
+            
+            try {
+                // Test the CORS endpoint
+                const response = await fetch('http://localhost:8000/api/test-cors');
+                const data = await response.json();
+                resultDiv.innerHTML = `✅ CORS Test Successful: ${JSON.stringify(data)}`;
+                
+                // If CORS test passes, try the upload endpoint
+                testUpload();
+            } catch (error) {
+                resultDiv.innerHTML = `❌ CORS Test Failed: ${error.message}`;
+                console.error('CORS Test Error:', error);
+            }
+        }
+        
+        async function testUpload() {
+            const uploadResult = document.getElementById('upload-result');
+            uploadResult.innerHTML = 'Testing file upload...';
+            
+            try {
+                // Create a test file
+                const fileContent = 'This is a test file content';
+                const file = new File([fileContent], 'test.txt', { type: 'text/plain' });
+                
+                const formData = new FormData();
+                formData.append('file', file, file.name);  // Include the filename
+                formData.append('description', 'Test upload');
+                formData.append('rag_type', 'semantic');
+                
+                // Log form data contents for debugging
+                for (let [key, value] of formData.entries()) {
+                    console.log(`FormData: ${key} =`, value);
+                }
+                
+                console.log('Sending request to /api/upload/test');
+                console.log('Request method: POST');
+                console.log('Request headers (set by browser):', {
+                    'Content-Type': 'multipart/form-data; boundary=' + (formData._boundary || 'auto')
+                });
+                
+                // Use the test endpoint that doesn't require authentication
+                const response = await fetch('http://localhost:8000/api/upload/test', {
+                    method: 'POST',
+                    body: formData,
+                    // Important: Don't set Content-Type header manually for FormData
+                    // The browser will set it with the correct boundary
+                    headers: {
+                        // Remove Authorization header if not needed
+                        // 'Authorization': 'Bearer YOUR_ACCESS_TOKEN'
+                    }
+                    // Remove credentials unless you're using session-based auth
+                    // credentials: 'include'
+                });
+                
+                console.log('Response status:', response.status, response.statusText);
+                
+                if (!response.ok) {
+                    const errorText = await response.text();
+                    console.error('Server response:', errorText);
+                    throw new Error(`Server responded with ${response.status}: ${response.statusText}\n${errorText}`);
+                }
+                
+                const result = await response.json();
+                console.log('Upload successful:', result);
+                uploadResult.innerHTML = `
+                    <div style="color: green;">✅ Upload Test Successful</div>
+                    <pre>${JSON.stringify(result, null, 2)}</pre>
+                `;
+            } catch (error) {
+                console.error('Upload failed:', error);
+                uploadResult.innerHTML = `
+                    <div style="color: red;">❌ Upload Test Failed: ${error.message}</div>
+                    <div>Check browser console for more details (Press F12 to open DevTools)</div>
+                `;
+            }
+        }
+    </script>
+</head>
+<body>
+    <h1>CORS Test Page</h1>
+    <button onclick="testCors()">Test CORS</button>
+    <div id="result" style="margin: 20px 0; padding: 10px; border: 1px solid #ccc;">
+        Click the button to test CORS
+    </div>
+    <div id="upload-result" style="margin: 20px 0; padding: 10px; border: 1px solid #ccc;">
+        Upload test will run after CORS test passes
+    </div>
+</body>
+</html>

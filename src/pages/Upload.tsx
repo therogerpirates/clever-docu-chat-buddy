@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { uploadFile } from "@/lib/api";
+import { uploadFile, uploadWebsite } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -46,21 +46,36 @@ const Upload = () => {
   };
 
   const handleUpload = async () => {
-    console.log('Starting file upload...');
+    console.log('Starting upload process...');
     
-    if (uploadData.type === "url" && !uploadData.url) {
-      const errorMsg = "Please enter a URL";
-      console.error(errorMsg);
-      toast({
-        title: "Error",
-        description: errorMsg,
-        variant: "destructive"
-      });
-      return;
-    }
-    
-    if (uploadData.type !== "url" && !uploadData.file) {
-      const errorMsg = "Please select a file";
+    // Validate inputs
+    if (uploadData.type === "url") {
+      if (!uploadData.url?.trim()) {
+        const errorMsg = "Please enter a valid URL";
+        console.error(errorMsg);
+        toast({
+          title: "Error",
+          description: errorMsg,
+          variant: "destructive"
+        });
+        return;
+      }
+      
+      // Basic URL validation
+      try {
+        new URL(uploadData.url);
+      } catch (e) {
+        const errorMsg = "Please enter a valid URL (include http:// or https://)";
+        console.error(errorMsg);
+        toast({
+          title: "Error",
+          description: errorMsg,
+          variant: "destructive"
+        });
+        return;
+      }
+    } else if (!uploadData.file) {
+      const errorMsg = "Please select a file to upload";
       console.error(errorMsg);
       toast({
         title: "Error", 
@@ -70,56 +85,50 @@ const Upload = () => {
       return;
     }
 
-    if (!uploadData.description.trim()) {
-      const errorMsg = "Please provide a description";
-      console.error(errorMsg);
-      toast({
-        title: "Error",
-        description: errorMsg,
-        variant: "destructive"
-      });
-      return;
-    }
-
     setIsUploading(true);
 
     try {
-      const formData = new FormData();
-      
-      if (uploadData.file) {
-        console.log('Appending file to form data:', {
+      if (uploadData.type === "url" && uploadData.url) {
+        // Handle website URL upload
+        console.log('Processing URL:', uploadData.url);
+        // Ensure URL has a protocol
+        const processedUrl = uploadData.url.startsWith('http') 
+          ? uploadData.url 
+          : `https://${uploadData.url}`;
+        
+        console.log('Sending website upload request...');
+        const responseData = await uploadWebsite(
+          processedUrl,
+          uploadData.description
+        );
+        console.log('Website upload successful:', responseData);
+      } else if (uploadData.file) {
+        // Handle file upload
+        const formData = new FormData();
+        formData.append('description', uploadData.description);
+        formData.append('rag_type', uploadData.ragType || 'semantic');
+        formData.append('file', uploadData.file);
+        
+        console.log('Processing file:', {
           name: uploadData.file.name,
           size: uploadData.file.size,
           type: uploadData.file.type
         });
-        formData.append('file', uploadData.file);
-      } else if (uploadData.url) {
-        console.log('Appending URL to form data:', uploadData.url);
-        formData.append('url', uploadData.url);
-      }
-      
-      console.log('Appending description:', uploadData.description);
-      formData.append('description', uploadData.description);
-      
-      if (uploadData.ragType) {
-        console.log('Appending RAG type:', uploadData.ragType);
-        formData.append('rag_type', uploadData.ragType);
+        
+        console.log('Sending file upload request...');
+        const responseData = await uploadFile(formData);
+        console.log('File upload successful:', responseData);
+      } else {
+        throw new Error('No file or URL provided');
       }
 
-      // Log form data entries (won't show file content)
-      for (let [key, value] of formData.entries()) {
-        console.log(`FormData - ${key}:`, value);
-      }
-
-      console.log('Sending file upload request...');
-      const responseData = await uploadFile(formData);
-      console.log('Upload successful:', responseData);
-
-      console.log('Upload successful:', responseData);
+      const successMessage = uploadData.type === "url"
+        ? "Website is being processed. You'll be notified when it's ready."
+        : `${uploadData.type.toUpperCase()} has been uploaded and is being processed.`;
 
       toast({
         title: "Success!",
-        description: `${uploadData.type.toUpperCase()} has been uploaded and is being processed.`,
+        description: successMessage,
       });
       
       // Reset form
@@ -128,16 +137,58 @@ const Upload = () => {
         description: "",
         file: undefined,
         url: undefined,
-        ragType: undefined
+        ragType: "semantic"
       });
       
-    } catch (error) {
+    } catch (error: unknown) {
       console.error('Upload error:', error);
-      const errorMessage = error instanceof Error ? error.message : "Failed to upload file. Please try again.";
+      
+      // Helper function to safely extract error message
+      const extractErrorMessage = (err: unknown): string => {
+        if (typeof err === 'string') return err;
+        if (err instanceof Error) return err.message;
+        if (err && typeof err === 'object') {
+          // Handle Axios error response
+          if ('response' in err && err.response) {
+            const response = (err as any).response;
+            if (response.data) {
+              if (typeof response.data === 'string') return response.data;
+              if (typeof response.data.detail === 'string') return response.data.detail;
+              if (typeof response.data.message === 'string') return response.data.message;
+            }
+            return response.statusText || 'Unknown error occurred';
+          }
+          // Handle other object-like errors
+          if ('message' in err && typeof (err as any).message === 'string') {
+            return (err as any).message;
+          }
+          // Try to stringify if possible
+          try {
+            return JSON.stringify(err);
+          } catch (e) {
+            return 'Unknown error occurred';
+          }
+        }
+        return 'An unknown error occurred';
+      };
+      
+      const errorMessage = extractErrorMessage(error).replace(/["']/g, '').trim();
+      
+      // Log detailed error information for debugging
+      const errorDetails: Record<string, unknown> = { message: errorMessage };
+      
+      if (error && typeof error === 'object') {
+        if ('message' in error) errorDetails.message = (error as any).message;
+        if ('status' in error) errorDetails.status = (error as any).status;
+        if ('data' in error) errorDetails.data = (error as any).data;
+        if ('stack' in error) errorDetails.stack = (error as any).stack;
+      }
+      
+      console.error('Upload error details:', errorDetails);
       
       toast({
         title: "Upload Failed",
-        description: errorMessage,
+        description: errorMessage || 'An unknown error occurred',
         variant: "destructive"
       });
     } finally {

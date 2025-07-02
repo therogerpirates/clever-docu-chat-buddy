@@ -2,6 +2,24 @@
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Bot, User } from "lucide-react";
+import { useEffect, useRef } from "react";
+
+// Simple markdown to HTML converter for basic formatting
+const renderMarkdown = (text: string) => {
+  // Convert markdown bold **text** to <strong>text</strong>
+  let html = text.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+  // Convert markdown links [text](url) to <a> tags
+  html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" class="text-blue-500 hover:underline" target="_blank" rel="noopener noreferrer">$1</a>');
+  // Convert newlines to <br> tags
+  html = html.replace(/\n/g, '<br />');
+  // Convert lists (simple - item format)
+  html = html.replace(/^\s*-\s+(.*)$/gm, '<li>$1</li>');
+  // Wrap list items in <ul> if they exist
+  if (html.includes('<li>')) {
+    html = '<ul class="list-disc pl-5 space-y-1 my-2">' + html + '</ul>';
+  }
+  return { __html: html };
+};
 
 export interface ChatMessageType {
   id: string;
@@ -28,7 +46,10 @@ export const ChatMessage = ({ message }: ChatMessageProps) => {
       
       <div className={`max-w-[80%] ${!isBot ? "flex-row-reverse" : ""}`}>
         <Card className={`p-3 ${isBot ? "bg-card border-border" : "bg-primary text-primary-foreground border-primary"}`}>
-          <p className="text-sm leading-relaxed">{message.content}</p>
+          <div 
+            className="text-sm leading-relaxed prose prose-sm dark:prose-invert max-w-none"
+            dangerouslySetInnerHTML={renderMarkdown(message.content)}
+          />
           
           {message.sources && message.sources.length > 0 && (
             <div className="mt-2 pt-2 border-t border-border/20">

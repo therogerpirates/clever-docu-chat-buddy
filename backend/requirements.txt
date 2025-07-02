@@ -10,3 +10,34 @@ langchain>=0.1.0
 langchain-core>=0.1.0
 langchain-groq>=0.3.2
 langsmith>=0.0.87
+
+# PDF processing
+PyPDF2>=3.0.1
+reportlab>=4.0.0
+
+# Data processing
+pandas>=2.0.0
+openpyxl>=3.1.0
+xlrd>=2.0.1
+
+# Web scraping
+trafilatura>=6.0.0
+newspaper4k>=0.0.1
+beautifulsoup4>=4.12.2
+lxml>=4.9.3
+requests>=2.31.0
+selenium>=4.10.0
+webdriver-manager>=4.0.0
+
+# Async
+httpx>=0.25.0
+
+# Text processing
+tiktoken>=0.5.1
+
+# JWT for authentication
+python-jose[cryptography]>=3.3.0
+passlib[bcrypt]>=1.7.4
+
+# CORS
+python-cors>=1.0.0

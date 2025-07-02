@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 import requests
+import time
 from sqlalchemy.orm import Session
 
 from .models import File, PDFDocument, CSVDocument, XLSXDocument, FileType, RagType, ProcessedData, FileStatus
@@ -30,7 +31,7 @@ def get_file_type(filename: str) -> FileType:
         return FileType.XLSX
     elif ext == 'pdf':
         return FileType.PDF
-    return FileType.OTHER
+    return None
 
 async def save_uploaded_file(file) -> str:
     """Save an uploaded file and return the file path"""
@@ -61,21 +62,24 @@ def delete_file(file_path: str) -> bool:
         return False
     return False
 
-def save_file_to_db(file_path: str, file_type: str, description: str, rag_type: str, db: Session) -> File:
+def save_file_to_db(file_path: str, file_type: str, description: str, rag_type: str, db: Session, uploaded_by_id: int, original_filename: str = None) -> File:
     """
     Save file metadata to the database and return the file record.
     """
     try:
         # Create file record
         file_uuid = str(uuid.uuid4())
+        path_obj = Path(file_path)
+        
         file_record = File(
             file_uuid=file_uuid,
-            filename=Path(file_path).name,
-            original_filename=Path(file_path).name,
+            filename=path_obj.name,
+            original_filename=original_filename or path_obj.name,
             file_path=str(file_path),
-            file_type=FileType(file_type.lower()),
+            file_type=FileType[file_type.upper()],
             rag_type=RagType(rag_type) if rag_type else None,
-            description=description
+            description=description,
+            uploaded_by_id=uploaded_by_id
         )
         db.add(file_record)
         db.commit()
@@ -135,7 +139,7 @@ def get_embedding_with_retry(text: str, max_retries: int = MAX_RETRIES) -> List[
             logger.warning(f"Attempt {attempt + 1} failed. Retrying in {retry_delay} seconds...")
             time.sleep(retry_delay)
 
-def process_file(file_path: str, file_type: str, description: str, rag_type: str = "semantic") -> Dict[str, Any]:
+def process_file(file_path: str, file_type: str, description: str, rag_type: str = "semantic", uploaded_by_id: int = None, original_filename: str = None) -> Dict[str, Any]:
     """
     Process an uploaded file based on its type.
     
@@ -144,6 +148,8 @@ def process_file(file_path: str, file_type: str, description: str, rag_type: str
         file_type: Type of the file (pdf, csv, xlsx)
         description: Description of the file
         rag_type: Type of RAG to use (default: "semantic")
+        uploaded_by_id: ID of the user who uploaded the file
+        original_filename: Original filename before processing
         
     Returns:
         dict: Processing result with status and metadata
@@ -151,7 +157,7 @@ def process_file(file_path: str, file_type: str, description: str, rag_type: str
     db = SessionLocal()
     try:
         # Save file metadata to database
-        file_record = save_file_to_db(file_path, file_type, description, rag_type, db)
+        file_record = save_file_to_db(file_path, file_type, description, rag_type, db, uploaded_by_id, original_filename)
         
         # Update file status to PROCESSING
         file_record.status = FileStatus.PROCESSING
@@ -159,15 +165,24 @@ def process_file(file_path: str, file_type: str, description: str, rag_type: str
         
         # Process file based on type with retry logic
         try:
+            if file_type is None:
+                raise ValueError(f"Unsupported file type for file: {file_record.original_filename}")
+
             if file_type.lower() == 'pdf':
                 from .pdf_utils import process_pdf
                 result = process_pdf(file_path, file_record.id, db)
             elif file_type.lower() == 'csv':
+                import pandas as pd
                 from .csv_utils import process_csv_with_embeddings
-                result = process_csv_with_embeddings(file_path)
+                # Read the CSV file into a DataFrame
+                df = pd.read_csv(file_path)
+                # Process the CSV and save chunks to database
+                result = process_csv_with_embeddings(df, db, file_record.id)
             elif file_type.lower() in ['xlsx', 'xls']:
+                import pandas as pd
                 from .xlsx_utils import process_xlsx_with_embeddings
-                result = process_xlsx_with_embeddings(file_path)
+                # Process the XLSX and save chunks to database
+                result = process_xlsx_with_embeddings(file_path, db, file_record.id)
             else:
                 raise ValueError(f"Unsupported file type: {file_type}")
             
@@ -187,6 +202,7 @@ def process_file(file_path: str, file_type: str, description: str, rag_type: str
         except Exception as process_error:
             # Update file status to ERROR if processing fails
             file_record.status = FileStatus.ERROR
+            file_record.processing_error = str(process_error)
             db.commit()
             logger.error(f"Error processing file {file_path}: {str(process_error)}")
             raise
